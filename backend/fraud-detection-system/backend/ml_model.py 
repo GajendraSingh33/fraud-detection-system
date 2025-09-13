@@ -1,0 +1,308 @@
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier, IsolationForest
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+import joblib
+from datetime import datetime, timedelta
+import random
+from typing import Dict, List, Any
+import warnings
+warnings.filterwarnings('ignore')
+
+class FraudDetectionML:
+    def __init__(self):
+        self.rf_model = None
+        self.isolation_forest = None
+        self.scaler = StandardScaler()
+        self.label_encoders = {}
+        self.feature_names = [
+            'amount', 'hour', 'day_of_week', 'merchant_type_encoded', 
+            'location_encoded', 'card_type_encoded', 'amount_log',
+            'is_weekend', 'is_night', 'amount_zscore'
+        ]
+        self.merchant_types = ['grocery', 'gas', 'restaurant', 'online', 'atm', 'pharmacy', 'entertainment', 'travel', 'unknown']
+        self.time_periods = ['morning', 'afternoon', 'evening', 'night']
+        self.card_types = ['debit', 'credit', 'prepaid']
+        self.locations = ['New York, NY', 'Los Angeles, CA', 'Chicago, IL', 'Houston, TX', 'Phoenix, AZ', 
+                         'Philadelphia, PA', 'San Antonio, TX', 'San Diego, CA', 'Dallas, TX', 'Unknown Location', 'Foreign Country']
+        
+    def generate_training_data(self, n_samples: int = 50000) -> pd.DataFrame:
+        """Generate synthetic training data for fraud detection"""
+        print(f"🔄 Generating {n_samples} training samples...")
+        
+        data = []
+        fraud_rate = 0.02  # 2% fraud rate (realistic)
+        
+        for i in range(n_samples):
+            is_fraud = random.random() < fraud_rate
+            
+            # Generate features based on fraud/normal patterns
+            if is_fraud:
+                # Fraudulent transaction patterns
+                amount = self._generate_fraud_amount()
+                merchant_type = random.choices(
+                    self.merchant_types, 
+                    weights=[5, 10, 15, 40, 25, 5, 10, 15, 30]  # Higher weight for risky merchants
+                )[0]
+                location = random.choices(
+                    self.locations,
+                    weights=[10, 10, 10, 10, 10, 10, 10, 10, 10, 30, 40]  # Higher weight for unknown/foreign
+                )[0]
+                time_of_day = random.choices(
+                    self.time_periods,
+                    weights=[10, 20, 30, 40]  # Higher weight for night
+                )[0]
+                card_type = random.choices(
+                    self.card_types,
+                    weights=[30, 40, 30]  # Slightly higher weight for prepaid
+                )[0]
+            else:
+                # Normal transaction patterns
+                amount = self._generate_normal_amount()
+                merchant_type = random.choices(
+                    self.merchant_types,
+                    weights=[30, 25, 35, 20, 15, 20, 15, 10, 5]  # Normal distribution
+                )[0]
+                location = random.choices(
+                    self.locations,
+                    weights=[15, 15, 15, 15, 15, 15, 15, 15, 15, 5, 2]  # Lower weight for unknown/foreign
+                )[0]
+                time_of_day = random.choices(
+                    self.time_periods,
+                    weights=[25, 35, 30, 10]  # Lower weight for night
+                )[0]
+                card_type = random.choices(
+                    self.card_types,
+                    weights=[45, 45, 10]  # Lower weight for prepaid
+                )[0]
+            
+            # Generate timestamp
+            timestamp = datetime.now() - timedelta(
+                days=random.randint(0, 365),
+                hours=random.randint(0, 23),
+                minutes=random.randint(0, 59)
+            )
+            
+            data.append({
+                'amount': amount,
+                'merchant_type': merchant_type,
+                'location': location,
+                'time_of_day': time_of_day,
+                'card_type': card_type,
+                'timestamp': timestamp,
+                'is_fraud': is_fraud
+            })
+        
+        return pd.DataFrame(data)
+    
+    def _generate_fraud_amount(self) -> float:
+        """Generate amount for fraudulent transactions"""
+        # Mix of small and large amounts
+        if random.random() < 0.3:
+            return round(random.uniform(0.01, 50), 2)  # Small amounts
+        else:
+            return round(random.uniform(500, 25000), 2)  # Large amounts
+    
+    def _generate_normal_amount(self) -> float:
+        """Generate amount for normal transactions"""
+        # Log-normal distribution for realistic amounts
+        return round(np.random.lognormal(mean=3, sigma=1.5), 2)
+    
+    def prepare_features(self, amount: float, merchant_type: str, location: str, 
+                        time_of_day: str, card_type: str, timestamp: datetime = None) -> Dict[str, float]:
+        """Prepare features for ML model"""
+        if timestamp is None:
+            timestamp = datetime.now()
+        
+        # Time-based features
+        hour = timestamp.hour
+        day_of_week = timestamp.weekday()
+        is_weekend = 1 if day_of_week >= 5 else 0
+        is_night = 1 if hour >= 22 or hour <= 6 else 0
+        
+        # Amount-based features
+        amount_log = np.log1p(amount)
+        amount_zscore = (amount - 150) / 500  # Rough normalization
+        
+        # Encode categorical variables
+        merchant_encoded = self._encode_categorical(merchant_type, self.merchant_types)
+        location_encoded = self._encode_categorical(location, self.locations)
+        card_encoded = self._encode_categorical(card_type, self.card_types)
+        
+        return {
+            'amount': amount,
+            'hour': hour,
+            'day_of_week': day_of_week,
+            'merchant_type_encoded': merchant_encoded,
+            'location_encoded': location_encoded,
+            'card_type_encoded': card_encoded,
+            'amount_log': amount_log,
+            'is_weekend': is_weekend,
+            'is_night': is_night,
+            'amount_zscore': amount_zscore
+        }
+    
+    def _encode_categorical(self, value: str, categories: List[str]) -> int:
+        """Simple categorical encoding"""
+        try:
+            return categories.index(value)
+        except ValueError:
+            return len(categories)  # Unknown category
+    
+    async def train_model(self):
+        """Train the fraud detection model"""
+        print("🤖 Training fraud detection model...")
+        
+        # Generate training data
+        df = self.generate_training_data(50000)
+        
+        # Prepare features
+        feature_data = []
+        for _, row in df.iterrows():
+            features = self.prepare_features(
+                amount=row['amount'],
+                merchant_type=row['merchant_type'],
+                location=row['location'],
+                time_of_day=row['time_of_day'],
+                card_type=row['card_type'],
+                timestamp=row['timestamp']
+            )
+            feature_data.append(features)
+        
+        # Convert to DataFrame
+        X = pd.DataFrame(feature_data)[self.feature_names]
+        y = df['is_fraud'].astype(int)
+        
+        print(f"📊 Training data shape: {X.shape}")
+        print(f"📊 Fraud rate: {y.mean():.2%}")
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        
+        # Scale features
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
+        
+        # Train Random Forest
+        print("🌲 Training Random Forest...")
+        self.rf_model = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=10,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            random_state=42,
+            class_weight='balanced'
+        )
+        self.rf_model.fit(X_train_scaled, y_train)
+        
+        # Train Isolation Forest for anomaly detection
+        print("🔍 Training Isolation Forest...")
+        self.isolation_forest = IsolationForest(
+            contamination=0.1,
+            random_state=42,
+            n_estimators=100
+        )
+        self.isolation_forest.fit(X_train_scaled[y_train == 0])  # Train on normal transactions only
+        
+        # Evaluate model
+        y_pred = self.rf_model.predict(X_test_scaled)
+        y_pred_proba = self.rf_model.predict_proba(X_test_scaled)[:, 1]
+        
+        print("\n📈 Model Performance:")
+        print(f"AUC Score: {roc_auc_score(y_test, y_pred_proba):.4f}")
+        print("\nClassification Report:")
+        print(classification_report(y_test, y_pred))
+        
+        # Save model
+        self.save_model()
+        print("💾 Model saved successfully!")
+    
+    def predict(self, features: Dict[str, float]) -> Dict[str, float]:
+        """Predict fraud probability for a transaction"""
+        if self.rf_model is None or self.isolation_forest is None:
+            raise ValueError("Model not trained or loaded")
+        
+        # Convert features to array
+        feature_vector = np.array([features[name] for name in self.feature_names]).reshape(1, -1)
+        feature_vector_scaled = self.scaler.transform(feature_vector)
+        
+        # Random Forest prediction
+        rf_proba = self.rf_model.predict_proba(feature_vector_scaled)[0, 1]
+        
+        # Isolation Forest anomaly score
+        anomaly_score = self.isolation_forest.decision_function(feature_vector_scaled)[0]
+        # Convert to probability (higher anomaly = higher fraud probability)
+        anomaly_proba = max(0, (0.5 - anomaly_score) / 0.5)
+        
+        # Combine predictions (weighted average)
+        fraud_probability = 0.7 * rf_proba + 0.3 * anomaly_proba
+        fraud_probability = min(max(fraud_probability, 0), 1)  # Clamp to [0, 1]
+        
+        # Calculate risk score (different from fraud probability)
+        risk_score = self._calculate_risk_score(features, fraud_probability)
+        
+        # Calculate confidence (based on prediction certainty)
+        confidence = max(fraud_probability, 1 - fraud_probability)
+        
+        return {
+            'fraud_probability': fraud_probability,
+            'risk_score': risk_score,
+            'confidence': confidence,
+            'rf_probability': rf_proba,
+            'anomaly_score': anomaly_score
+        }
+    
+    def _calculate_risk_score(self, features: Dict[str, float], fraud_prob: float) -> float:
+        """Calculate a comprehensive risk score"""
+        risk_score = fraud_prob * 0.6  # Base from ML prediction
+        
+        # Amount-based risk
+        amount = features['amount']
+        if amount > 5000:
+            risk_score += 0.2
+        elif amount > 1000:
+            risk_score += 0.1
+        elif amount < 1:
+            risk_score += 0.15
+        
+        # Time-based risk
+        if features['is_night'] == 1:
+            risk_score += 0.1
+        if features['is_weekend'] == 1:
+            risk_score += 0.05
+        
+        # Location-based risk (unknown/foreign locations)
+        if features['location_encoded'] >= len(self.locations) - 2:
+            risk_score += 0.15
+        
+        return min(risk_score, 1.0)
+    
+    def save_model(self):
+        """Save the trained model"""
+        model_data = {
+            'rf_model': self.rf_model,
+            'isolation_forest': self.isolation_forest,
+            'scaler': self.scaler,
+            'feature_names': self.feature_names,
+            'merchant_types': self.merchant_types,
+            'time_periods': self.time_periods,
+            'card_types': self.card_types,
+            'locations': self.locations
+        }
+        joblib.dump(model_data, 'fraud_model.joblib')
+    
+    def load_model(self):
+        """Load a pre-trained model"""
+        model_data = joblib.load('fraud_model.joblib')
+        self.rf_model = model_data['rf_model']
+        self.isolation_forest = model_data['isolation_forest']
+        self.scaler = model_data['scaler']
+        self.feature_names = model_data['feature_names']
+        self.merchant_types = model_data['merchant_types']
+        self.time_periods = model_data['time_periods']
+        self.card_types = model_data['card_types']
+        self.locations = model_data['locations']
